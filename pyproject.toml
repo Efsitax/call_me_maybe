@@ -1,0 +1,19 @@
+[project]
+name = "call-me-maybe"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "huggingface-hub>=1.24.0",
+    "numpy>=2.5.1",
+    "pydantic>=2.13.4",
+    "torch>=2.13.0",
+    "transformers>=5.14.1",
+]
+
+[dependency-groups]
+dev = [
+    "flake8>=7.3.0",
+    "mypy>=2.3.0",
+]
