@@ -11,11 +11,11 @@ def load_function_definitions(path: str) -> list[FunctionDefinition]:
         with open(path) as f:
             data = json.load(f)
         definitions = [FunctionDefinition(**item) for item in data]
+        return definitions
     except FileNotFoundError:
         print(f"File not found at path {path}.")
     except ValueError:
         print("Failed at parsing.")
-    return definitions
 
 
 def load_prompts(path: str) -> list[PromptEntry]:
@@ -27,8 +27,8 @@ def load_prompts(path: str) -> list[PromptEntry]:
         with open(path) as f:
             data = json.load(f)
         prompts = [PromptEntry(**item) for item in data]
+        return prompts
     except FileNotFoundError:
         print(f"File not found at path {path}.")
     except ValueError:
         print("Failed at parsing.")
-    return prompts
