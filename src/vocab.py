@@ -61,7 +61,8 @@ def _build_id_to_text(id_to_token: list[str | None],
         if id_to_token[i] is None:
             continue
         try:
-            id_to_text[i] = model.decode([i])
+            decoded = model.decode([i])
+            id_to_text[i] = decoded if decoded else None
         except Exception:
             id_to_text[i] = None
     return id_to_text
@@ -88,3 +89,16 @@ def build_vocabulary(model: Small_LLM_Model) -> list[str | None]:
         print("Failed at parsing on JSON.")
         sys.exit(1)
     return id_to_text
+
+
+def find_special_token_id(model: Small_LLM_Model, content: str) -> int:
+    """
+    Finds the token id of a special token by its literal content
+    (e.g. "<|im_end|>").
+    """
+    added_token: list[dict[str, Any]] = _load_added_tokens(model)
+    for entry in added_token:
+        if entry["content"] == content:
+            return int(entry["id"])
+    else:
+        raise ValueError(f"Special token {content!r} not found.")
