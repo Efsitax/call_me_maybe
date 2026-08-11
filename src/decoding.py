@@ -133,94 +133,117 @@ def _valid_number_token_ids(current_text: str,
     return valid_ids
 
 
-def _generate_number_with_first_id(model: Small_LLM_Model,
-                                   prompt: str,
-                                   id_to_text: list[str | None],
-                                   stop_token_id: int,
-                                   max_steps: int,
-                                   excluded_first_ids: set[int]
-                                   ) -> tuple[float, int]:
-    """
-    Runs constrained decoding step by step until a complete, valid
-    JSON number is generated. Returns the value together with the
-    token id chosen at the very first step, so callers can exclude
-    it on a retry if the value turns out to be an unwanted duplicate.
-    excluded_first_ids are never allowed as the first generated token.
-    """
-    input_ids: list[int] = model.encode(prompt)[0].tolist()
-    current_text: str = ""
-    last_chosen_id: int | None = None
-    repeat_count: int = 0
-    first_chosen_id: int | None = None
-    try:
-        for _ in range(max_steps):
-            logits: list[float] = model.get_logits_from_input_ids(input_ids)
-            valid_ids: set[int] = _valid_number_token_ids(current_text,
-                                                          id_to_text)
-            if current_text == "":
-                valid_ids -= excluded_first_ids
-            if _is_complete_number(current_text):
-                valid_ids.add(stop_token_id)
-            masked: np.ndarray = _mask_logits(logits, valid_ids)
-            chosen_id: int = int(np.argmax(masked))
-            if first_chosen_id is None:
-                first_chosen_id = chosen_id
-            if chosen_id == last_chosen_id:
-                repeat_count += 1
-            else:
-                repeat_count = 0
-            last_chosen_id = chosen_id
-            if repeat_count >= 2 and _is_complete_number(current_text):
-                break
-            if chosen_id == stop_token_id:
-                break
-            input_ids.append(chosen_id)
-            next_token_text: str | None = id_to_text[chosen_id]
-            if next_token_text is None:
-                raise RuntimeError(
-                    f"Token id {chosen_id} decoded to None unexpectedly"
-                )
-            current_text += next_token_text
-        else:
-            raise RuntimeError(
-                f"Could not complete a number within {max_steps} steps"
-            )
-    except IndexError as e:
-        raise RuntimeError(
-            f"Token id out of range while masking logits: {e}"
-        ) from e
-    if not _is_complete_number(current_text):
-        raise RuntimeError(
-            f"Generated text {current_text!r} is not a valid JSON number."
-            )
-    assert first_chosen_id is not None
-    return float(current_text), first_chosen_id
-
-
 def generate_number(model: Small_LLM_Model,
                     prompt: str,
                     id_to_text: list[str | None],
                     stop_token_id: int,
-                    max_steps: int = 20,
+                    max_steps: int = 12,
                     forbidden_values: set[float] | None = None,
-                    max_attempts: int = 3) -> float:
+                    max_attempts: int = 2) -> float:
     """
-    Runs constrained decoding to produce a JSON number for the prompt.
-    If the generated value collides with one of forbidden_values (e.g.
-    a value already used for a sibling parameter), retries up to
-    max_attempts times while banning the previous attempt's first
-    token, forcing a different value to be considered.
+    Runs constrained decoding to produce a JSON number, retrying with
+    a different first token if the result collides with
+    forbidden_values.
     """
     if forbidden_values is None:
         forbidden_values = set()
     excluded_first_ids: set[int] = set()
     value: float = 0.0
+
     for _ in range(max_attempts):
-        value, first_id = _generate_number_with_first_id(
-            model, prompt, id_to_text, stop_token_id, max_steps,
-            excluded_first_ids
-        )
+        input_ids: list[int] = model.encode(prompt)[0].tolist()
+        current_text: str = ""
+        last_chosen_id: int | None = None
+        repeat_count: int = 0
+        first_chosen_id: int | None = None
+        try:
+            for _ in range(max_steps):
+                logits: list[float] = model.get_logits_from_input_ids(
+                    input_ids
+                )
+                valid_ids: set[int] = _valid_number_token_ids(current_text,
+                                                              id_to_text)
+                if current_text == "":
+                    valid_ids -= excluded_first_ids
+                if _is_complete_number(current_text):
+                    valid_ids.add(stop_token_id)
+                masked: np.ndarray = _mask_logits(logits, valid_ids)
+                chosen_id: int = int(np.argmax(masked))
+                if first_chosen_id is None:
+                    first_chosen_id = chosen_id
+                if chosen_id == last_chosen_id:
+                    repeat_count += 1
+                else:
+                    repeat_count = 0
+                last_chosen_id = chosen_id
+                if repeat_count >= 2 and _is_complete_number(current_text):
+                    break
+                if chosen_id == stop_token_id:
+                    break
+                input_ids.append(chosen_id)
+                next_token_text: str | None = id_to_text[chosen_id]
+                if next_token_text is None:
+                    raise RuntimeError(
+                        f"Token id {chosen_id} decoded to None unexpectedly"
+                    )
+                current_text += next_token_text
+            else:
+                raise RuntimeError(
+                    f"Could not complete a number within {max_steps} steps"
+                )
+        except IndexError as e:
+            raise RuntimeError(
+                f"Token id out of range while masking logits: {e}"
+            ) from e
+        if not _is_complete_number(current_text):
+            raise RuntimeError(
+                f"Generated text {current_text!r} is not a valid "
+                "JSON number."
+            )
+        assert first_chosen_id is not None
+        value = float(current_text)
         if value not in forbidden_values:
             return value
-        excluded_first_ids.add(first_id)
+        excluded_first_ids.add(first_chosen_id)
     return value
+
+
+def generate_string(model: Small_LLM_Model,
+                    prompt: str,
+                    id_to_text: list[str | None],
+                    stop_token_id: int,
+                    max_steps: int = 30) -> str:
+    """
+    Runs constrained decoding to produce an open-ended JSON string
+    value for the prompt.
+    """
+    input_ids: list[int] = model.encode(prompt)[0].tolist()
+    current_text: str = ""
+    valid_ids: set[int] = {i for i, t in enumerate(id_to_text)
+                           if t is not None}
+    valid_ids.add(stop_token_id)
+    try:
+        for _ in range(max_steps):
+            logits: list[float] = model.get_logits_from_input_ids(input_ids)
+            masked: np.ndarray = _mask_logits(logits, valid_ids)
+            chosen_id: int = int(np.argmax(masked))
+            if chosen_id == stop_token_id:
+                break
+            next_token_text: str | None = id_to_text[chosen_id]
+            if next_token_text is None:
+                raise RuntimeError(
+                    f"Token id {chosen_id} decoded to None unexpectedly"
+                )
+            if '"' in next_token_text:
+                break
+            input_ids.append(chosen_id)
+            current_text += next_token_text
+        else:
+            raise RuntimeError(
+                f"Could not complete a string within {max_steps} steps"
+            )
+    except IndexError as e:
+        raise RuntimeError(
+            f"Token id out of range while masking logits: {e}"
+        ) from e
+    return current_text
