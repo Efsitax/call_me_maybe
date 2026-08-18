@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Any
 
 
 class Parameter(BaseModel):
@@ -30,3 +31,12 @@ class PromptEntry(BaseModel):
     Represents a single prompt entry from function_calling_tests.json.
     """
     prompt: str
+
+
+class FunctionCallResult(BaseModel):
+    """
+    Represents one resolved function call for a prompt.
+    """
+    prompt: str
+    name: str
+    parameters: dict[str, Any]

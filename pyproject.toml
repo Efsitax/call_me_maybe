@@ -17,3 +17,7 @@ dev = [
     "flake8>=7.3.0",
     "mypy>=2.3.0",
 ]
+
+[[tool.mypy.overrides]]
+module = "llm_sdk.*"
+ignore_errors = true

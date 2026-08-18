@@ -27,6 +27,11 @@ def _resolve_parameters(model: Small_LLM_Model,
             parameters[param_name] = src.generate_string(
                 model, prompt, vocab_text, stop_token_id
             )
+        elif param.type == "boolean":
+            result = src.select_candidates(
+                model, prompt, ["true", "false"], vocab_text
+            )
+            parameters[param_name] = result == "true"
         else:
             raise NotImplementedError(
                 f"Parameter type {param.type!r} not supported yet."
@@ -44,8 +49,10 @@ def main() -> None:
     vocab_text = src.build_vocabulary(model)
     stop_token_id: int = src.find_special_token_id(model, "<|im_end|>")
     func_names = [fn.name for fn in func_defs]
+    call_results: list[src.FunctionCallResult] = []
     for entry in prompts:
         try:
+
             fn_prompt: str = src.build_function_prompt(model, entry.prompt,
                                                        func_defs)
             chosen_function: str = src.select_candidates(model, fn_prompt,
@@ -54,12 +61,22 @@ def main() -> None:
             func_def: src.FunctionDefinition = next(
                 fn for fn in func_defs if fn.name == chosen_function
             )
-            parameters = _resolve_parameters(model, entry.prompt, func_def,
-                                             vocab_text, stop_token_id)
+            parameters: dict[str, Any] = _resolve_parameters(model,
+                                                             entry.prompt,
+                                                             func_def,
+                                                             vocab_text,
+                                                             stop_token_id)
             print(f"{entry.prompt} -> {chosen_function} " +
                   f"parameters: {parameters}")
+            call_result = src.FunctionCallResult(
+                prompt=entry.prompt,
+                name=chosen_function,
+                parameters=parameters
+            )
+            call_results.append(call_result)
         except Exception as e:
             print(f"Error Occured: {e}")
+    src.save_results(call_results, args.output)
 
 
 if __name__ == "__main__":
