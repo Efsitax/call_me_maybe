@@ -1,5 +1,6 @@
 from llm_sdk import Small_LLM_Model
 import numpy as np
+from typing import Callable
 
 
 def _mask_logits(logits: list[float], valid_ids: set[int]) -> np.ndarray:
@@ -46,14 +47,21 @@ def select_candidates(model: Small_LLM_Model,
                       prompt: str,
                       candidates: list[str],
                       id_to_text: list[str | None],
-                      max_steps: int = 30) -> str:
+                      max_steps: int = 30,
+                      encode_fn: (
+                          Callable[[str, Small_LLM_Model], list[int]] | None
+                      ) = None
+                      ) -> str:
     """
     Runs constrained decoding step by step until the generated text
     exactly matches one of the given candidates, then returns it.
     """
     if not candidates:
         raise ValueError("Candidates list must not be empty.")
-    input_ids: list[int] = model.encode(prompt)[0].tolist()
+    if encode_fn is not None:
+        input_ids: list[int] = encode_fn(prompt, model)
+    else:
+        input_ids = model.encode(prompt)[0].tolist()
     current_text: str = ""
     try:
         for _ in range(max_steps):
