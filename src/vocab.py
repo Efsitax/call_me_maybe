@@ -14,24 +14,36 @@ def _get_vocab_size(model: Small_LLM_Model) -> int:
     return len(logits)
 
 
+def _load_tokenizer_json(model: Small_LLM_Model) -> dict[str, Any]:
+    """
+    Loads and parses the model's tokenizer.json file.
+    """
+    vocab_path = Path(model.get_path_to_vocab_file())
+    tokenizer_json_path = vocab_path.parent / "tokenizer.json"
+    with open(tokenizer_json_path) as f:
+        data: dict[str, Any] = json.load(f)
+    return data
+
+
 def _load_raw_vocab(model: Small_LLM_Model) -> dict[str, int]:
     """
-    Loads the raw vocabulary in JSON.
+    Loads the vocabulary from tokenizer.json's model.vocab field,
+    which has the same shape regardless of the underlying tokenizer
+    algorithm (BPE, Unigram, WordPiece, ...), unlike the native
+    vocab file whose format varies by model.
     """
-    vocab: dict[str, int]
-    with open(model.get_path_to_vocab_file()) as f:
-        vocab = json.load(f)
-    return vocab
+    token_data = _load_tokenizer_json(model)
+    vocab = token_data["model"]["vocab"]
+    if isinstance(vocab, dict):
+        return {token: int(token_id) for token, token_id in vocab.items()}
+    return {entry[0]: i for i, entry in enumerate(vocab)}
 
 
 def _load_added_tokens(model: Small_LLM_Model) -> list[dict[str, Any]]:
     """
     Loads added tokens.
     """
-    vocab_path = Path(model.get_path_to_vocab_file())
-    tokenizer_json_path = vocab_path.parent / "tokenizer.json"
-    with open(tokenizer_json_path) as f:
-        token_data = json.load(f)
+    token_data = _load_tokenizer_json(model)
     added: list[dict[str, Any]] = token_data.get("added_tokens", [])
     return added
 
@@ -102,3 +114,24 @@ def find_special_token_id(model: Small_LLM_Model, content: str) -> int:
             return int(entry["id"])
     else:
         raise ValueError(f"Special token {content!r} not found.")
+
+
+def find_stop_token_id(model: Small_LLM_Model) -> int:
+    """
+    Finds the model's end-of-turn token id by trying common special
+    token names in order (ChatML, GPT-2 style, then Llama/Mistral
+    style), so different models can be supported without hardcoding
+    one specific token.
+    """
+    candidates: list[str] = ["<|im_end|>", "<|endoftext|>", "</s>"]
+    stop_token: int = -1
+    for candidate in candidates:
+        try:
+            stop_token = find_special_token_id(model, candidate)
+            break
+        except ValueError:
+            continue
+    if stop_token != -1:
+        return stop_token
+    else:
+        raise ValueError("Stop token not found.")

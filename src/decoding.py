@@ -1,11 +1,12 @@
 from llm_sdk import Small_LLM_Model
 import numpy as np
+import re
 from typing import Callable
 
 
 def _mask_logits(logits: list[float], valid_ids: set[int]) -> np.ndarray:
     """
-    Sets every logit outside valid_ids to -inf, leaving valid ones untouched.
+    Sets every logit outside valid_ids to -inf.
     """
     masked_logits: np.ndarray = np.full(len(logits), -np.inf)
     for i in valid_ids:
@@ -29,8 +30,7 @@ def _valid_next_token_ids(current_text: str,
                           candidates: list[str],
                           id_to_text: list[str | None]) -> set[int]:
     """
-    Determines which token ids can be appended to current_text while still
-    matching at least one candidate.
+    Finds token ids that keep current_text a prefix of some candidate.
     """
     valid_ids: set[int] = set()
     for token_id, token_text in enumerate(id_to_text):
@@ -53,8 +53,8 @@ def select_candidates(model: Small_LLM_Model,
                       ) = None
                       ) -> str:
     """
-    Runs constrained decoding step by step until the generated text
-    exactly matches one of the given candidates, then returns it.
+    Runs constrained decoding until the output exactly matches one of
+    candidates.
     """
     if not candidates:
         raise ValueError("Candidates list must not be empty.")
@@ -128,8 +128,7 @@ def _is_complete_number(text: str) -> bool:
 def _valid_number_token_ids(current_text: str,
                             id_to_text: list[str | None]) -> set[int]:
     """
-    Determines which token ids can be appended to current_text while still
-    forming a valid (partial) JSON number.
+    Finds token ids that keep current_text a valid partial JSON number.
     """
     valid_ids: set[int] = set()
     for token_id, token_text in enumerate(id_to_text):
@@ -141,22 +140,41 @@ def _valid_number_token_ids(current_text: str,
     return valid_ids
 
 
+def _numbers_in_text(text: str) -> set[str]:
+    """
+    Extracts every number-like substring (e.g. "12", "-3", "0.375")
+    literally appearing in text.
+    """
+    return set(re.findall(r"-?\d+(?:\.\d+)?", text))
+
+
+def _number_grounded(number_text: str, grounding_pool: set[str]) -> bool:
+    """
+    True if question has no literal numbers, or number_text matches
+    one exactly.
+    """
+    return not grounding_pool or number_text in grounding_pool
+
+
 def generate_number(model: Small_LLM_Model,
                     prompt: str,
+                    req_type: str,
                     id_to_text: list[str | None],
                     stop_token_id: int,
+                    question: str = "",
                     max_steps: int = 12,
                     forbidden_values: set[float] | None = None,
-                    max_attempts: int = 2) -> float:
+                    max_attempts: int = 10) -> float:
     """
-    Runs constrained decoding to produce a JSON number, retrying with
-    a different first token if the result collides with
-    forbidden_values.
+    Runs constrained decoding to produce a JSON number, retrying on a
+    new first token when the result collides with forbidden_values or
+    isn't grounded in question.
     """
     if forbidden_values is None:
         forbidden_values = set()
+    grounding_pool: set[str] = _numbers_in_text(question)
     excluded_first_ids: set[int] = set()
-    value: float = 0.0
+    value: float | int = 0.0
 
     for _ in range(max_attempts):
         input_ids: list[int] = model.encode(prompt)[0].tolist()
@@ -173,6 +191,9 @@ def generate_number(model: Small_LLM_Model,
                                                               id_to_text)
                 if current_text == "":
                     valid_ids -= excluded_first_ids
+                grounded = _number_grounded(current_text, grounding_pool)
+                if _is_complete_number(current_text) and grounded:
+                    break
                 if _is_complete_number(current_text):
                     valid_ids.add(stop_token_id)
                 masked: np.ndarray = _mask_logits(logits, valid_ids)
@@ -209,49 +230,108 @@ def generate_number(model: Small_LLM_Model,
                 "JSON number."
             )
         assert first_chosen_id is not None
-        value = float(current_text)
-        if value not in forbidden_values:
+        if req_type == "number":
+            value = float(current_text)
+        elif req_type == "integer":
+            value = int(current_text)
+        grounded = _number_grounded(current_text, grounding_pool)
+        if value not in forbidden_values and grounded:
             return value
         excluded_first_ids.add(first_chosen_id)
     return value
+
+
+_CONTINUATION_CHAR = re.compile(r"[\w/.-]")
+
+
+def _is_grounded_in_text(value: str, text: str) -> bool:
+    """
+    True if value appears in text as a whole match, not a truncated
+    fragment (e.g. "home/data" inside "/home/data" doesn't count).
+    """
+    if not value:
+        return True
+    idx = text.find(value)
+    if idx == -1:
+        return False
+    if idx > 0 and _CONTINUATION_CHAR.match(text[idx - 1]):
+        return False
+    end = idx + len(value)
+    if end < len(text) and _CONTINUATION_CHAR.match(text[end]):
+        return False
+    return True
+
+
+def _string_needs_retry(result: str, question: str) -> bool:
+    """
+    True only when result is a truncated fragment of a match in
+    question; a clean match or an absent (derived) value need no
+    retry.
+    """
+    if not question or _is_grounded_in_text(result, question):
+        return False
+    return result in question
 
 
 def generate_string(model: Small_LLM_Model,
                     prompt: str,
                     id_to_text: list[str | None],
                     stop_token_id: int,
-                    max_steps: int = 30) -> str:
+                    question: str = "",
+                    max_steps: int = 30,
+                    max_attempts: int = 5) -> str:
     """
-    Runs constrained decoding to produce an open-ended JSON string
-    value for the prompt.
+    Runs constrained decoding to produce an open-ended JSON string,
+    retrying on a new first token when the result is a truncated
+    fragment of question.
     """
-    input_ids: list[int] = model.encode(prompt)[0].tolist()
-    current_text: str = ""
-    valid_ids: set[int] = {i for i, t in enumerate(id_to_text)
-                           if t is not None}
-    valid_ids.add(stop_token_id)
-    try:
-        for _ in range(max_steps):
-            logits: list[float] = model.get_logits_from_input_ids(input_ids)
-            masked: np.ndarray = _mask_logits(logits, valid_ids)
-            chosen_id: int = int(np.argmax(masked))
-            if chosen_id == stop_token_id:
-                break
-            next_token_text: str | None = id_to_text[chosen_id]
-            if next_token_text is None:
-                raise RuntimeError(
-                    f"Token id {chosen_id} decoded to None unexpectedly"
+    excluded_first_ids: set[int] = set()
+    result: str = ""
+    first_result: str | None = None
+
+    for _ in range(max_attempts):
+        input_ids: list[int] = model.encode(prompt)[0].tolist()
+        current_text: str = ""
+        first_chosen_id: int | None = None
+        valid_ids: set[int] = {i for i, t in enumerate(id_to_text)
+                               if t is not None}
+        valid_ids.add(stop_token_id)
+        try:
+            for _ in range(max_steps):
+                logits: list[float] = model.get_logits_from_input_ids(
+                    input_ids
                 )
-            if '"' in next_token_text:
-                break
-            input_ids.append(chosen_id)
-            current_text += next_token_text
-        else:
+                ids = (valid_ids - excluded_first_ids if current_text == ""
+                       else valid_ids)
+                masked: np.ndarray = _mask_logits(logits, ids)
+                chosen_id: int = int(np.argmax(masked))
+                if first_chosen_id is None:
+                    first_chosen_id = chosen_id
+                if chosen_id == stop_token_id:
+                    break
+                next_token_text: str | None = id_to_text[chosen_id]
+                if next_token_text is None:
+                    raise RuntimeError(
+                        f"Token id {chosen_id} decoded to None unexpectedly"
+                    )
+                if '"' in next_token_text:
+                    current_text += next_token_text.split('"')[0]
+                    break
+                input_ids.append(chosen_id)
+                current_text += next_token_text
+            else:
+                raise RuntimeError(
+                    f"Could not complete a string within {max_steps} steps"
+                )
+        except IndexError as e:
             raise RuntimeError(
-                f"Could not complete a string within {max_steps} steps"
-            )
-    except IndexError as e:
-        raise RuntimeError(
-            f"Token id out of range while masking logits: {e}"
-        ) from e
-    return current_text
+                f"Token id out of range while masking logits: {e}"
+            ) from e
+        result = current_text.strip()
+        if not _string_needs_retry(result, question):
+            return result
+        if first_result is None:
+            first_result = result
+        assert first_chosen_id is not None
+        excluded_first_ids.add(first_chosen_id)
+    return first_result if first_result is not None else result

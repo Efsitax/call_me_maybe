@@ -12,5 +12,6 @@ def parse_args() -> argparse.Namespace:
                         default="data/input/function_calling_tests.json")
     parser.add_argument("--output",
                         default="data/output/function_calling_results.json")
-
+    parser.add_argument("--model",
+                        default="Qwen/Qwen3-0.6B")
     return parser.parse_args()
