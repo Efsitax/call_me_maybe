@@ -15,7 +15,7 @@ def _resolve_parameters(model: Small_LLM_Model,
     parameters: dict[str, Any] = {}
     for param_name, param in func_def.parameters.items():
         prompt = src.build_parameter_prompt(model, question, func_def,
-                                            param_name)
+                                            param_name, parameters)
         if param.type == "number" or param.type == "integer":
             used_numbers = {v for v in parameters.values()
                             if isinstance(v, (float, int))}

@@ -262,6 +262,23 @@ def _is_grounded_in_text(value: str, text: str) -> bool:
     return True
 
 
+def _valid_string_token_ids(id_to_text: list[str | None],
+                            stop_token_id: int) -> set[int]:
+    """
+    Defines the grammar of a string value: any decodable token except
+    one containing an escaped backslash ("\\\\"). The prefill opens a
+    Python string literal, so without this rule the model writes
+    escape sequences (C:\\\\Users) instead of the raw value (C:\\Users).
+    """
+    valid_ids: set[int] = set()
+    for token_id, token_text in enumerate(id_to_text):
+        if token_text is None or "\\\\" in token_text:
+            continue
+        valid_ids.add(token_id)
+    valid_ids.add(stop_token_id)
+    return valid_ids
+
+
 def _string_needs_retry(result: str, question: str) -> bool:
     """
     True only when result is a truncated fragment of a match in
@@ -293,9 +310,8 @@ def generate_string(model: Small_LLM_Model,
         input_ids: list[int] = model.encode(prompt)[0].tolist()
         current_text: str = ""
         first_chosen_id: int | None = None
-        valid_ids: set[int] = {i for i, t in enumerate(id_to_text)
-                               if t is not None}
-        valid_ids.add(stop_token_id)
+        valid_ids: set[int] = _valid_string_token_ids(id_to_text,
+                                                      stop_token_id)
         try:
             for _ in range(max_steps):
                 logits: list[float] = model.get_logits_from_input_ids(

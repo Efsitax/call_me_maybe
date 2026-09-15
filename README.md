@@ -119,12 +119,33 @@ Three different notions of "valid" are used, one per value type:
   (`id_to_text`) are always passed explicitly into functions rather than
   read from module-level state. This keeps every function testable in
   isolation and makes the multi-model support possible.
-- **Assistant-prefill for parameter extraction.** Rather than asking the
-  model "what is the value of X?" and hoping for a bare answer, the
-  assistant's turn is pre-seeded with the start of its own natural
-  sentence (e.g. `The 1st parameter's value is "`). This reliably turns an
-  open-ended chat model into something that completes with just the
-  value, using `"` as a stop signal.
+- **Parameters are extracted as a Python call, not as prose.** The
+  parameter prompt shows the function as a Python signature with its
+  docstring and asks for "the Python call for this request"; the
+  assistant's turn is then pre-seeded with the call written up to the
+  argument being generated, e.g.
+  `fn_substitute_string_with_regex(source_string="Programming is fun", regex="[aeiou]", replacement="`.
+  Two things fall out of this framing for free. First, a code context
+  makes the model write argument *values* rather than the words that
+  describe them: for "replace vowels with asterisks" it writes `[aeiou]`
+  and `*`, where an earlier prose-style prefill
+  (`The 3rd parameter's value is "`) copied the literal words
+  "vowels" and "asterisks" from the question. Second, every earlier
+  argument is visible while generating the next one, so the model
+  never assigns the same fragment to two parameters. `"` still serves
+  as the stop signal for strings.
+- **Escape sequences are excluded from the string grammar, not
+  decoded afterwards.** Because the prefill opens a double-quoted Python
+  string, the model wants to write what a Python string body would
+  contain — `C:\\Users\\john` for a Windows path. Rather than
+  post-process the output, `generate_string` masks every token that
+  contains `\\` (two backslashes), exactly the way `"` is treated as a
+  stop signal: the grammar says a value is raw text, and the model then
+  picks its next-best token, `C:\Users\john`. The value written is
+  still entirely the model's; the code only removed one shape from the
+  table. The cost is that a value which legitimately contains two
+  consecutive backslashes (a UNC path, a regex matching a literal
+  backslash) cannot be produced.
 - **Question placed last in the prompt.** Early versions put the question
   before the instructions; the model would sometimes echo nearby prompt
   words (e.g. output the literal word "name" for a parameter called
@@ -159,19 +180,20 @@ sets (11 prompts each):
 
 | Set | Result |
 |---|---|
-| Public | 9/11 (81.8%) — PASSED |
+| Public | 10/11 (90.9%) — PASSED |
 | Private | 10/11 (90.9%) — PASSED |
 
 - **JSON validity: 100%.** Every run produces a fully parseable output
   file; constrained decoding guarantees this structurally, and the
   never-drop-a-prompt design guarantees it even on a per-prompt failure.
-- **Speed.** All 11 public-set prompts complete in ~16 seconds on Apple
+- **Speed.** All 11 public-set prompts complete in ~11 seconds on Apple
   Silicon (measured with `time uv run python -m src`), comfortably inside
   the 5-minute budget.
-- **Where accuracy is lost.** All remaining failures fall into two
-  categories, discussed in detail below: values that must be *derived*
-  rather than *extracted* (e.g. synthesizing a regex like `[aeiou]` from
-  the word "vowels"), and edge cases in embedded punctuation.
+- **Where accuracy is lost.** The two remaining failures are the regex
+  for "replace all numbers" (the model writes the literal `34` from the
+  question instead of `\d+`) and a template whose correct value contains
+  a `"` (`Say "hello" to {name}`, where the model switches to single
+  quotes). Both are discussed below.
 
 ### Multi-model results
 
@@ -179,9 +201,9 @@ The same code, unmodified, run against several models via `--model`:
 
 | Model | Tokenizer family | Result |
 |---|---|---|
-| `Qwen/Qwen3-0.6B` (default) | BPE | Public 9/11, Private 10/11 |
-| `Qwen/Qwen3-1.7B` | BPE | Public 9/11, Private 9/11 |
-| `Qwen/Qwen2.5-0.5B-Instruct` | BPE | Public 8/11 (PASSED) |
+| `Qwen/Qwen3-0.6B` (default) | BPE | Public 10/11, Private 10/11 |
+| `Qwen/Qwen3-1.7B` | BPE | Public 10/11, Private 9/11 |
+| `Qwen/Qwen2.5-0.5B-Instruct` | BPE | Public 11/11 (PERFECT) — it also writes `\d+` for "all numbers" |
 | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | SentencePiece-derived | Runs end to end, no crash; lower accuracy |
 | `HuggingFaceTB/SmolLM2-360M-Instruct` | BPE | Runs, but function selection collapses to one answer |
 | `gpt2` | BPE (base, not instruction-tuned) | Runs, but collapses to a fixed positional answer regardless of the question |
@@ -247,15 +269,15 @@ does not fix the remaining failure category described below.
   Fixed by reading the vocabulary from `tokenizer.json`'s `model.vocab`
   field instead, which has the same shape for every tokenizer backend
   (see Design Decisions).
-- **The unsolved case: values that must be derived, not extracted.**
-  Two tests ask for a value that never appears in the question at all —
-  a regex synthesized from a concept ("vowels" → `[aeiou]`) and a symbol
-  described by a word ("asterisks" → `*`). The grounding guard cannot
-  help here by design (it only rejects values *absent* from the
-  question when *some other grounded* value existed to retry toward), so
-  this was investigated directly:
-  - A general (non-answer-specific) hint added to the prompt had no
-    measurable effect on either Qwen3-0.6B or Qwen3-1.7B.
+- **Values that must be derived, not extracted.** Two tests ask for a
+  value that never appears in the question at all — a regex synthesized
+  from a concept ("vowels" → `[aeiou]`) and a symbol described by a word
+  ("asterisks" → `*`). The grounding guard cannot help here by design
+  (it only rejects values *absent* from the question when *some other
+  grounded* value existed to retry toward), so this was investigated
+  directly. Several approaches were tested and rejected first:
+  - A general (non-answer-specific) hint added to the prose prompt had
+    no measurable effect on either Qwen3-0.6B or Qwen3-1.7B.
   - Letting the model reason in an unconstrained `<think>` block before
     answering solved the "numbers → `\d+`" case on Qwen3-1.7B (and
     revealed the empty `<think></think>` prefill we use for speed was
@@ -266,15 +288,35 @@ does not fix the remaining failure category described below.
   - An explicit "should this be copied or derived?" routing question,
     asked before generation, scored 3/10 on a mixed test set — worse than
     guessing, because the model over-applies "derived" as a default.
+  - A prompt instruction that maps the literal words "asterisks" or
+    "NUMBERS" to their expected outputs was deliberately **not**
+    implemented, even though it would pass these two specific tests —
+    it is answer-specific to this exact wording, would not survive a
+    differently-worded test set, and is exactly the kind of heuristic
+    the subject explicitly rules out for this project.
 
-  All three are genuine, tested attempts at a general solution; none
-  generalized cleanly. A prompt instruction that maps the literal words
-  "asterisks" or "NUMBERS" to their expected outputs was deliberately
-  **not** implemented, even though it would pass these two specific
-  tests — it is answer-specific to this exact wording, would not survive
-  a differently-worded test set, and is exactly the kind of heuristic the
-  subject explicitly rules out for this project. This is documented as a
-  known limitation rather than worked around.
+  What finally worked was changing the *framing* rather than adding
+  information: presenting the function as a Python signature and
+  pre-seeding the assistant with the call written up to the current
+  argument (see Design Decisions). In a code context the model's own
+  priors take over — it has seen `re.sub(r"[aeiou]", "*", s)` far more
+  often than a sentence describing it — and it produced `[aeiou]` and
+  `*` on both Qwen3-0.6B and Qwen3-1.7B with no answer-specific text
+  in the prompt. The same change first *broke* the Windows-path test:
+  the model, now writing a Python string body, correctly escaped the
+  backslashes (`C:\\Users\\john`). Priming the string with a raw-string
+  prefix (`r"`) was tested and made everything worse (the model started
+  inventing leading `\\` and capitalising names). Decoding the body as
+  a Python literal with `ast.literal_eval` also restored the test, but
+  it rewrites the model's text in code, which is the kind of
+  intervention this project avoids. The fix kept was a grammar rule:
+  tokens containing `\\` are masked out while generating a string, and
+  the model itself then writes the single-backslash path. Two cases remain
+  open: `\d+` for "all numbers" (the model still prefers the literal
+  `34` from the question), and a template value that itself contains
+  `"` — the model switches to `'hello'` rather than emitting `\"`, and
+  an escape-aware stop rule was tested and changed nothing because the
+  model never chooses the backslash in the first place.
 
 ## Testing Strategy
 

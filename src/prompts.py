@@ -1,6 +1,8 @@
 from llm_sdk import Small_LLM_Model
 from src import FunctionDefinition
 from .vocab import find_special_token_id
+import json
+from typing import Any
 
 _chat_template_cache: dict[int, tuple[bool, str]] = {}
 
@@ -49,17 +51,6 @@ def _wrap_chat_prompt(model: Small_LLM_Model, content: str,
             f"<|im_start|>assistant\n{think_prefill}{assistant_prefill}")
 
 
-def _ordinal(position: int) -> str:
-    """
-    Converts a 1-based position to its English ordinal (1st, 2nd, ...).
-    """
-    if 10 <= position % 100 <= 20:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
-    return f"{position}{suffix}"
-
-
 def _build_selection_prompt(question: str,
                             fn_defs: list[FunctionDefinition]) -> str:
     """
@@ -85,45 +76,63 @@ def build_function_prompt(model: Small_LLM_Model,
 
 
 def _build_parameter_prompt(question: str,
-                            func_def: FunctionDefinition,
-                            param_name: str) -> str:
+                            func_def: FunctionDefinition) -> str:
     """
-    Builds a prompt asking for one parameter's value. The question
-    comes last so the model doesn't echo nearby prompt words instead
-    of answering.
+    Builds a prompt showing the function as a Python signature and
+    asking for the call that fulfils the question. A code context makes
+    the model write argument *values* (e.g. "*", "[aeiou]") rather than
+    the words that describe them. The question comes last so the model
+    doesn't echo nearby prompt words instead of answering.
     """
-    param_type = func_def.parameters[param_name].type
-    all_params = ", ".join(func_def.parameters.keys())
-    return (f"The function \"{func_def.name}\" will be called: " +
-            f"{func_def.description}\n" +
-            "Its parameters, in order, are: " +
-            f"{all_params}\n" +
-            f"Extract the value for parameter '{param_name}' " +
-            f"(a {param_type}) from the question below.\n" +
-            f"Question: {question}")
+    signature = ", ".join(f"{name}: {param.type}"
+                          for name, param in func_def.parameters.items())
+    return ("```python\n" +
+            f"def {func_def.name}({signature}):\n" +
+            f"    \"\"\"{func_def.description}\"\"\"\n" +
+            "```\n" +
+            f"Write the Python call to {func_def.name} " +
+            f"for this request: {question}")
 
 
-def _parameter_prefill(func_def: FunctionDefinition, param_name: str) -> str:
+def _python_literal(value: Any) -> str:
     """
-    Primes the assistant's reply: an opening quote for strings (so it
-    writes the value instead of a sentence), a neutral marker otherwise.
+    Renders an already-resolved parameter value as Python source.
+    """
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, str):
+        return json.dumps(value)
+    return repr(value)
+
+
+def _parameter_prefill(func_def: FunctionDefinition,
+                       param_name: str,
+                       resolved: dict[str, Any]) -> str:
+    """
+    Primes the assistant's reply with the call written up to the
+    requested argument, including the values already resolved for the
+    preceding parameters, and an opening quote for strings.
     """
     param_type = func_def.parameters[param_name].type
-    if param_type != "string":
-        return ">>>"
-    param_names = list(func_def.parameters.keys())
-    position = param_names.index(param_name) + 1
-    ordinal = _ordinal(position)
-    return f"The {ordinal} parameter's value is \""
+    previous = "".join(f"{name}={_python_literal(value)}, "
+                       for name, value in resolved.items())
+    opening_quote = "\"" if param_type == "string" else ""
+    return ("```python\n" +
+            f"{func_def.name}({previous}{param_name}={opening_quote}")
 
 
 def build_parameter_prompt(model: Small_LLM_Model,
                            question: str,
                            func_def: FunctionDefinition,
-                           param_name: str) -> str:
+                           param_name: str,
+                           resolved: dict[str, Any] | None = None) -> str:
     """
     Builds the chat-wrapped, prefilled prompt for a parameter's value.
+    resolved holds the values already generated for earlier parameters
+    of the same call, in order.
     """
-    raw_prompt = _build_parameter_prompt(question, func_def, param_name)
-    prefill = _parameter_prefill(func_def, param_name)
+    if resolved is None:
+        resolved = {}
+    raw_prompt = _build_parameter_prompt(question, func_def)
+    prefill = _parameter_prefill(func_def, param_name, resolved)
     return _wrap_chat_prompt(model, raw_prompt, prefill)
